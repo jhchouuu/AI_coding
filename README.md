@@ -6,10 +6,9 @@ A collection of AI agent skills and rules for automated coding workflows.
 
 | Skill | Description |
 |-------|-------------|
-| [mori-testing](skills/mori-testing/SKILL.md) | **Top-level** — auto-detects NIC type and delegates to the correct skill |
-| [mori-bnxt-intranode-testing](skills/mori-bnxt-intranode-testing/SKILL.md) | Run BNXT (Thor2) intra-node tests |
-| [mori-mlnx-intranode-testing](skills/mori-mlnx-intranode-testing/SKILL.md) | Run Mellanox (CX7) intra-node tests |
-| [mori-ainic-intranode-testing](skills/mori-ainic-intranode-testing/SKILL.md) | Run AINIC (Pollara) intra-node tests |
+| [mori-testing](skills/mori-testing/SKILL.md) | **Top-level** — auto-detects IBGDA NIC type and delegates to intranode or internode |
+| [mori-intranode-testing](skills/mori-intranode-testing/SKILL.md) | Single-node tests (EP, IO, IR, CCL/shmem) — supports bnxt/mlx5/ionic |
+| [mori-internode-testing](skills/mori-internode-testing/SKILL.md) | 2-node EP16 benchmark and stress tests — supports bnxt/mlx5/ionic |
 
 ## Usage
 
@@ -18,7 +17,7 @@ A collection of AI agent skills and rules for automated coding workflows.
 Symlink or copy skills into `~/.cursor/skills/`:
 
 ```bash
-ln -s /path/to/AI_coding/skills/mori-bnxt-intranode-testing ~/.cursor/skills/mori-bnxt-intranode-testing
+ln -s /path/to/AI_coding/skills/mori-intranode-testing ~/.cursor/skills/mori-intranode-testing
 ```
 
 ### Other AI Agents
