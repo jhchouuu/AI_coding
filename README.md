@@ -6,9 +6,10 @@ A collection of AI agent skills and rules for automated coding workflows.
 
 | Skill | Description |
 |-------|-------------|
-| [mori-bnxt-intranode-testing](skills/mori-bnxt-intranode-testing/SKILL.md) | Run BNXT (Thor2) intra-node tests for the mori project |
-| [mori-mlnx-intranode-testing](skills/mori-mlnx-intranode-testing/SKILL.md) | Run Mellanox (CX7) intra-node tests for the mori project |
-| [mori-ainic-intranode-testing](skills/mori-ainic-intranode-testing/SKILL.md) | Run AINIC (Pollara) intra-node tests for the mori project |
+| [mori-testing](skills/mori-testing/SKILL.md) | **Top-level** — auto-detects NIC type and delegates to the correct skill |
+| [mori-bnxt-intranode-testing](skills/mori-bnxt-intranode-testing/SKILL.md) | Run BNXT (Thor2) intra-node tests |
+| [mori-mlnx-intranode-testing](skills/mori-mlnx-intranode-testing/SKILL.md) | Run Mellanox (CX7) intra-node tests |
+| [mori-ainic-intranode-testing](skills/mori-ainic-intranode-testing/SKILL.md) | Run AINIC (Pollara) intra-node tests |
 
 ## Usage
 
