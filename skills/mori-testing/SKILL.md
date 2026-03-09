@@ -1,60 +1,49 @@
 ---
 name: mori-testing
-description: Run mori intra-node tests. Automatically detects the NIC type on the server (BNXT Thor2, Mellanox CX7, or AMD AINIC Pollara) and delegates to the appropriate testing skill. Use when the user asks to run tests, debug test failures, benchmark, or asks about testing mori.
+description: Run mori tests. Supports both intra-node (single node) and inter-node (multi-node) testing. Automatically detects the IBGDA NIC type on the server (bnxt/mlx5/ionic) and delegates to the appropriate testing skill. Use when the user asks to run tests, debug test failures, benchmark, or asks about testing mori.
 ---
 
-# Mori Testing (Auto-Detect NIC)
+# Mori Testing (Auto-Detect)
 
-This is the top-level testing skill. It detects the server's NIC type and
-delegates to the correct NIC-specific skill.
+This is the top-level testing skill. It determines the test scope
+(intra-node vs inter-node) and delegates to the correct sub-skill.
+Both sub-skills detect the IBGDA NIC type internally using the same
+multi-priority logic as mori's `detect_nic_type()` (sysfs → lspci vendor
+IDs → library fallback).
 
-## Step 1: Detect NIC type
+## Step 1: Determine test scope
 
-Run on the **host** (not inside Docker):
+| User request | Skill to use |
+|--------------|--------------|
+| General testing, intra-node, single node | `mori-intranode-testing/SKILL.md` |
+| Inter-node, multi-node, 2-node, EP16, bench, stress | `mori-internode-testing/SKILL.md` |
 
-```bash
-echo "=== PCI devices (RDMA NICs) ==="
-lspci | grep -iE "mellanox|broadcom|pensando|ionic" || echo "No RDMA NICs found via lspci"
+If the user asks for **inter-node**, **multi-node**, **2-node**, **EP16**,
+**bench**, or **stress** testing, go directly to the inter-node skill.
 
-echo ""
-echo "=== ibv_devinfo ==="
-ibv_devinfo 2>/dev/null | grep -E "hca_id|vendor_id|fw_ver" || echo "ibv_devinfo not available"
+Otherwise, go to the intra-node skill. Both sub-skills handle NIC detection
+internally.
 
-echo ""
-echo "=== NIC driver modules ==="
-lsmod | grep -iE "mlx5|bnxt|ionic" || echo "No RDMA driver modules loaded"
-```
+## Step 2: Delegate
 
-## Step 2: Select the correct skill
-
-Based on the detection results:
-
-| Detection | NIC Type | Skill to use |
-|-----------|----------|--------------|
-| `mlx5` in lsmod, or `Mellanox` in lspci | **Mellanox CX7** | Read and follow `mori-mlnx-intranode-testing/SKILL.md` |
-| `bnxt` in lsmod, or `Broadcom` in lspci | **BNXT Thor2** | Read and follow `mori-bnxt-intranode-testing/SKILL.md` |
-| `ionic` in lsmod, or `Pensando` in lspci | **AINIC Pollara** | Read and follow `mori-ainic-intranode-testing/SKILL.md` |
-| Multiple NICs detected | **Ask user** | Report which NICs are found and ask which one to test with |
-| No RDMA NIC detected | **Stop** | Report the issue and do not proceed |
-
-## Step 3: Delegate
-
-Once the NIC type is determined, **read the corresponding skill file** and
-follow it from the beginning (Pre-check → Docker → Verify libs → Install →
-Test → Cleanup).
+Read the corresponding skill file and follow it from the beginning.
 
 The sub-skills are located at:
 
 ```
-.cursor/skills/mori-bnxt-intranode-testing/SKILL.md
-.cursor/skills/mori-mlnx-intranode-testing/SKILL.md
-.cursor/skills/mori-ainic-intranode-testing/SKILL.md
+skills/mori-intranode-testing/SKILL.md
+skills/mori-internode-testing/SKILL.md
 ```
 
 ## Notes
 
-- Always run NIC detection on the **host**, not inside Docker.
-- If the user explicitly specifies a NIC type (e.g. "run BNXT tests"), skip
-  detection and go directly to the corresponding skill.
-- If the server has multiple NIC types, ask the user which one to test with
-  unless they already specified.
+- If the user explicitly specifies a NIC type (e.g. "run BNXT tests") or sets
+  `MORI_DEVICE_NIC` env var, pass that to the sub-skill to skip auto-detection.
+- For inter-node tests, the user must provide or confirm two server hostnames
+  and ensure SSH access is available to both.
+- The NIC here refers specifically to the **IBGDA NIC** (InfiniBand GPU-Direct
+  Async), not general network NICs. Detection follows the same priority chain
+  as mori's build system: `MORI_DEVICE_NIC` env → `/sys/class/infiniband/`
+  sysfs → `lspci -nn -d ::0200` vendor IDs (`14e4`=bnxt, `15b3`=mlx5,
+  `1dd8`=ionic) → userspace library fallback (`libbnxt_re.so` / `libmlx5.so` /
+  `libionic.so`).

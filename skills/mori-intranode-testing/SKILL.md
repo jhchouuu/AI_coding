@@ -1,9 +1,9 @@
 ---
-name: mori-ainic-intranode-testing
-description: Run AINIC (Pollara) intra-node tests for mori project. Use when the user asks to run tests, debug test failures, add new tests, benchmark, or asks about testing mori components (EP, IO, shmem, IR) on a single node with AMD AINIC (Pollara) NIC.
+name: mori-intranode-testing
+description: Run intra-node (single node) tests for mori project. Automatically detects the NIC type (BNXT Thor2, Mellanox CX7, or AINIC Pollara) and uses the appropriate Docker image and library verification. Use when the user asks to run tests, debug test failures, benchmark, or asks about testing mori components (EP, IO, shmem, IR) on a single node.
 ---
 
-# Mori AINIC (Pollara) Intra-Node Testing
+# Mori Intra-Node Testing
 
 ## Important: All commands run inside Docker
 
@@ -27,12 +27,96 @@ sudo docker ps --filter "name=mori_test_"
 - If there are existing `mori_test_*` containers, **report them to the user**
   and confirm whether to proceed (concurrent tests may cause GPU contention).
 
-## Step 1: Create a fresh Docker container
+## Step 1: Detect IBGDA NIC type
+
+The NIC here refers specifically to the **RDMA NIC used for IBGDA**
+(InfiniBand GPU-Direct Async). The detection mirrors mori's own
+`detect_nic_type()` in `python/mori/jit/config.py` and `detect_device_nic()`
+in `CMakeLists.txt`.
+
+If the user explicitly specifies a NIC type (e.g. "run BNXT tests") or sets
+`MORI_DEVICE_NIC`, skip detection and use that directly.
+
+Otherwise, run the following detection chain on the **host** (not inside
+Docker). Stop at the first step that yields a result.
+
+### Priority 1: MORI_DEVICE_NIC env override
+
+```bash
+echo "MORI_DEVICE_NIC=${MORI_DEVICE_NIC:-<not set>}"
+```
+
+If set to `bnxt`, `ionic`, or `mlx5`, use that value directly. Skip the rest.
+
+### Priority 2: /sys/class/infiniband/ (sysfs)
+
+```bash
+echo "=== InfiniBand sysfs devices ==="
+ls /sys/class/infiniband/ 2>/dev/null || echo "No /sys/class/infiniband/"
+
+echo ""
+echo "=== Device drivers ==="
+for dev in /sys/class/infiniband/*; do
+  name=$(basename "$dev")
+  driver=$(readlink -f "$dev/device/driver" 2>/dev/null | xargs basename 2>/dev/null)
+  echo "  $name -> driver: ${driver:-unknown}"
+done
+```
+
+Map device names and drivers to NIC types:
+
+| Device name prefix / Driver | NIC Type |
+|-----------------------------|----------|
+| `bnxt_re*` or driver `bnxt_re` / `bnxt_en` | **bnxt** |
+| `mlx5*` or driver `mlx5_core` / `mlx5_ib` | **mlx5** |
+| `ionic*` or driver `ionic_rdma` / `ionic` | **ionic** |
+
+Pick the NIC type with **the most devices**. Tie-break order: mlx5 > bnxt > ionic.
+
+### Priority 3: lspci PCI vendor IDs
+
+```bash
+echo "=== PCI Ethernet controllers (class 0200) ==="
+lspci -nn -d ::0200
+```
+
+Count matches by PCI vendor ID:
+
+| Vendor ID | Vendor | NIC Type |
+|-----------|--------|----------|
+| `14e4` | Broadcom (BCM576xx/578xx) | **bnxt** |
+| `15b3` | Mellanox/NVIDIA (ConnectX) | **mlx5** |
+| `1dd8` | AMD/Pensando (Pollara) | **ionic** |
+
+Pick the vendor with the most devices. Tie-break: mlx5 > bnxt > ionic.
+
+### Priority 4: Userspace library fallback
+
+```bash
+echo "=== NIC userspace libraries ==="
+find /usr/local/lib /usr/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu \
+  -maxdepth 1 \( -name 'libmlx5.so' -o -name 'libbnxt_re.so' -o -name 'libionic.so' \) \
+  2>/dev/null
+```
+
+First library found wins (search order: mlx5 > bnxt > ionic).
+
+### NIC type → Docker image
+
+| NIC Type | Docker Image | Login Required |
+|----------|-------------|----------------|
+| **mlx5** (Mellanox CX7) | `rocm/pytorch:rocm7.1.1_ubuntu24.04_py3.12_pytorch_release_2.8.0` | No |
+| **bnxt** (Broadcom Thor2) | `rocm/pytorch-private:mori_bnxt235_rocm711_ubuntu24.04_py3.12` | Yes |
+| **ionic** (AMD AINIC Pollara) | `rocm/pytorch-private:sglang-0.5.8-rocm720-mi35x-mori-0216` | Yes |
+
+If no NIC is detected at any priority level, **stop and report** the issue.
+
+## Step 2: Create a fresh Docker container
 
 Each test run uses a **new container from scratch**. Generate a unique name
 (e.g. `mori_test_<timestamp>`) to avoid conflicts.
 
-The image is private, login first if needed:
+For private images, login first:
 
 ```bash
 sudo docker login -u rocmshared
@@ -40,19 +124,17 @@ sudo docker login -u rocmshared
 
 Copy the source code to an isolated directory so concurrent tests don't conflict:
 
-Determine the mori source path (the root of the mori git repo in the current
-workspace), then copy it:
-
 ```bash
-MORI_SRC="<path to mori repo>"  # e.g. /mnt/nvme1/jiahzhou/mori
+MORI_SRC="<path to mori repo>"
 CONTAINER_NAME="mori_test_$(date +%s)"
 TEST_SRC="/tmp/mori_test_$(date +%s)"
 rsync -a --exclude build/ "$MORI_SRC"/ "$TEST_SRC"
 ```
 
-Launch the container:
+Launch the container with the image determined in Step 1:
 
 ```bash
+DOCKER_IMAGE="<image from Step 1 table>"
 sudo docker run \
   --group-add video --network=host \
   --ulimit nproc=100000:100000 --pids-limit=-1 \
@@ -60,35 +142,64 @@ sudo docker run \
   -d --ipc=host --privileged -it \
   -v /home/:/home/ -v /root:/root -v /mnt:/mnt -v "$TEST_SRC":"$TEST_SRC" \
   --name "$CONTAINER_NAME" \
-  rocm/pytorch-private:sglang-0.5.8-rocm720-mi35x-mori-0216
+  "$DOCKER_IMAGE"
 ```
 
-## Step 2: Verify AINIC libraries (inside container)
+## Step 3: Verify NIC libraries (inside container)
 
-Before installing mori, check that the AINIC (Pollara) userspace library exists
-inside the container:
+Run the check that matches the detected NIC type:
+
+### BNXT Thor2
+
+```bash
+sudo docker exec "$CONTAINER_NAME" bash -c "\
+  echo '=== BNXT shared libraries ===' && \
+  ls -l /usr/local/lib/libbnxt_re*.so* && \
+  echo '=== BNXT headers ===' && \
+  ls -l /usr/include/infiniband/bnxt_re_dv.h /usr/include/infiniband/bnxt_re_hsi.h && \
+  echo '=== libibverbs ===' && \
+  dpkg -l | grep libibverbs || rpm -qa | grep libibverbs && \
+  echo '=== BNXT userlib version ===' && \
+  strings /usr/local/lib/libbnxt_re.so | grep -i version || true && \
+  echo '=== ibv_devinfo ===' && \
+  ibv_devinfo 2>/dev/null | head -20 || echo 'ibv_devinfo not available'"
+```
+
+Verify: `libbnxt_re.so`, `libbnxt_re-rdmav34.so`, `bnxt_re_dv.h`,
+`bnxt_re_hsi.h` exist, and libibverbs/libbnxt_re userlib versions match.
+
+### Mellanox CX7
+
+```bash
+sudo docker exec "$CONTAINER_NAME" bash -c "\
+  echo '=== libmlx5 ===' && \
+  find /usr -name 'libmlx5*' 2>/dev/null && \
+  echo '=== libibverbs ===' && \
+  dpkg -l | grep libibverbs || rpm -qa | grep libibverbs && \
+  echo '=== ibv_devinfo ===' && \
+  ibv_devinfo 2>/dev/null | head -20 || echo 'ibv_devinfo not available'"
+```
+
+Verify: `libmlx5.so` exists and libibverbs is installed.
+
+### AINIC Pollara
 
 ```bash
 sudo docker exec "$CONTAINER_NAME" bash -c "\
   echo '=== AINIC (libionic) ===' && \
   find /usr -name 'libionic*' 2>/dev/null && \
   ldconfig -p | grep libionic || echo 'libionic not found in ldconfig' && \
-  echo '' && \
   echo '=== libibverbs ===' && \
   dpkg -l | grep libibverbs || rpm -qa | grep libibverbs && \
-  echo '' && \
-  echo '=== ibv_devinfo (AINIC device check) ===' && \
+  echo '=== ibv_devinfo ===' && \
   ibv_devinfo 2>/dev/null | head -20 || echo 'ibv_devinfo not available'"
 ```
 
-Verify:
-- `libionic.so` exists (required for IBGDA with AMD Pollara NICs)
-- libibverbs is installed
-- `ibv_devinfo` detects AINIC devices
+Verify: `libionic.so` exists and `ibv_devinfo` detects AINIC devices.
 
-If `libionic` is missing, **stop and fix the image** before proceeding.
+If the required library is missing, **stop and fix the image** before proceeding.
 
-## Step 3: Install mori (inside container)
+## Step 4: Install mori (inside container)
 
 ```bash
 sudo docker exec "$CONTAINER_NAME" bash -c "cd $TEST_SRC && pip install ."
@@ -100,7 +211,7 @@ Verify:
 sudo docker exec "$CONTAINER_NAME" python -c "import mori; print('OK')"
 ```
 
-## Step 4: Run Tests (inside container)
+## Step 5: Run Tests (inside container)
 
 All test commands are run via `sudo docker exec "$CONTAINER_NAME" bash -c "..."`.
 
@@ -174,7 +285,7 @@ After all tests complete, produce a summary table:
 
 Possible result values: **PASS**, **FAIL** (non-zero exit), **HANG** (exit 124 / timeout).
 
-## Step 5: Cleanup
+## Step 6: Cleanup
 
 After all tests complete (pass or fail), remove the container and the copied source:
 
@@ -196,9 +307,10 @@ sudo rm -rf "$TEST_SRC"
 ## Test Workflow Checklist
 
 - [ ] Check `rocm-smi` and `docker ps` for existing tests
+- [ ] Detect NIC type on host (or use user-specified type)
 - [ ] Copy source to isolated temp directory (exclude `build/`)
-- [ ] Create fresh Docker container with unique name
-- [ ] Verify `libionic.so` and libibverbs exist inside container
+- [ ] Create fresh Docker container with the matching image
+- [ ] Verify NIC-specific libraries exist inside container
 - [ ] `pip install .` inside container
 - [ ] `python -c "import mori; print('OK')"` passes inside container
 - [ ] Run each test with `timeout`, record PASS/FAIL/HANG
@@ -218,3 +330,4 @@ sudo rm -rf "$TEST_SRC"
    - **GPU not available**: `rocm-smi` and `ROCR_VISIBLE_DEVICES`
    - **Port conflicts**: Tests use `get_free_port()` from `tests/python/utils.py`
    - **MPI errors**: Ensure OpenMPI is installed and use `--allow-run-as-root`
+   - **Missing system deps (Mellanox image)**: May need `apt-get install -y libopenmpi-dev openmpi-bin libpci-dev libibverbs-dev`
