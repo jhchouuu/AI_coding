@@ -10,6 +10,23 @@ description: Run BNXT intra-node tests for mori project. Use when the user asks 
 All install and test commands MUST be executed inside the Docker container via
 `sudo docker exec`. Never run mori tests directly on the host.
 
+## Pre-check: Verify no other tests are running
+
+Before starting, check if someone else is using the GPUs:
+
+```bash
+# Check GPU usage
+rocm-smi
+
+# Check for existing mori test containers
+sudo docker ps --filter "name=mori_test_"
+```
+
+- If `rocm-smi` shows significant GPU memory usage or active processes,
+  **stop and ask the user** before proceeding — someone else may be running tests.
+- If there are existing `mori_test_*` containers, **report them to the user**
+  and confirm whether to proceed (concurrent tests may cause GPU contention).
+
 ## Step 1: Create a fresh Docker container
 
 Each test run uses a **new container from scratch**. Generate a unique name

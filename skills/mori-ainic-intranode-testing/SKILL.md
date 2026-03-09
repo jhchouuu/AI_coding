@@ -1,9 +1,9 @@
 ---
-name: mori-mlnx-intranode-testing
-description: Run Mellanox (CX7) intra-node tests for mori project. Use when the user asks to run tests, debug test failures, add new tests, benchmark, or asks about testing mori components (EP, IO, shmem, IR) on a single node with Mellanox NIC.
+name: mori-ainic-intranode-testing
+description: Run AINIC (Pollara) intra-node tests for mori project. Use when the user asks to run tests, debug test failures, add new tests, benchmark, or asks about testing mori components (EP, IO, shmem, IR) on a single node with AMD AINIC (Pollara) NIC.
 ---
 
-# Mori Mellanox Intra-Node Testing
+# Mori AINIC (Pollara) Intra-Node Testing
 
 ## Important: All commands run inside Docker
 
@@ -32,6 +32,12 @@ sudo docker ps --filter "name=mori_test_"
 Each test run uses a **new container from scratch**. Generate a unique name
 (e.g. `mori_test_<timestamp>`) to avoid conflicts.
 
+The image is private, login first if needed:
+
+```bash
+sudo docker login -u rocmshared
+```
+
 Copy the source code to an isolated directory so concurrent tests don't conflict:
 
 Determine the mori source path (the root of the mori git repo in the current
@@ -54,30 +60,33 @@ sudo docker run \
   -d --ipc=host --privileged -it \
   -v /home/:/home/ -v /root:/root -v /mnt:/mnt -v "$TEST_SRC":"$TEST_SRC" \
   --name "$CONTAINER_NAME" \
-  rocm/pytorch:rocm7.1.1_ubuntu24.04_py3.12_pytorch_release_2.8.0
+  rocm/pytorch-private:sglang-0.5.8-rocm720-mi35x-mori-0216
 ```
 
-## Step 2: Verify Mellanox libraries (inside container)
+## Step 2: Verify AINIC libraries (inside container)
 
-Check that `libmlx5` and libibverbs exist inside the container:
+Before installing mori, check that the AINIC (Pollara) userspace library exists
+inside the container:
 
 ```bash
 sudo docker exec "$CONTAINER_NAME" bash -c "\
-  echo '=== libmlx5 ===' && \
-  find /usr -name 'libmlx5*' 2>/dev/null && \
+  echo '=== AINIC (libionic) ===' && \
+  find /usr -name 'libionic*' 2>/dev/null && \
+  ldconfig -p | grep libionic || echo 'libionic not found in ldconfig' && \
   echo '' && \
   echo '=== libibverbs ===' && \
   dpkg -l | grep libibverbs || rpm -qa | grep libibverbs && \
   echo '' && \
-  echo '=== ibv_devinfo (Mellanox device check) ===' && \
+  echo '=== ibv_devinfo (AINIC device check) ===' && \
   ibv_devinfo 2>/dev/null | head -20 || echo 'ibv_devinfo not available'"
 ```
 
 Verify:
-- `libmlx5.so` exists (required for IBGDA with Mellanox ConnectX NICs)
+- `libionic.so` exists (required for IBGDA with AMD Pollara NICs)
 - libibverbs is installed
+- `ibv_devinfo` detects AINIC devices
 
-If `libmlx5` is missing, **stop and fix the image** before proceeding.
+If `libionic` is missing, **stop and fix the image** before proceeding.
 
 ## Step 3: Install mori (inside container)
 
@@ -186,9 +195,10 @@ sudo rm -rf "$TEST_SRC"
 
 ## Test Workflow Checklist
 
+- [ ] Check `rocm-smi` and `docker ps` for existing tests
 - [ ] Copy source to isolated temp directory (exclude `build/`)
 - [ ] Create fresh Docker container with unique name
-- [ ] Verify `libmlx5.so` and libibverbs exist inside container
+- [ ] Verify `libionic.so` and libibverbs exist inside container
 - [ ] `pip install .` inside container
 - [ ] `python -c "import mori; print('OK')"` passes inside container
 - [ ] Run each test with `timeout`, record PASS/FAIL/HANG
