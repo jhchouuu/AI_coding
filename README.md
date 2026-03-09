@@ -6,7 +6,8 @@ A collection of AI agent skills and rules for automated coding workflows.
 
 | Skill | Description |
 |-------|-------------|
-| [mori-bnxt-intranode-testing](skills/mori-bnxt-intranode-testing/SKILL.md) | Run BNXT intra-node tests for the mori project |
+| [mori-bnxt-intranode-testing](skills/mori-bnxt-intranode-testing/SKILL.md) | Run BNXT (Thor2) intra-node tests for the mori project |
+| [mori-mlnx-intranode-testing](skills/mori-mlnx-intranode-testing/SKILL.md) | Run Mellanox (CX7) intra-node tests for the mori project |
 
 ## Usage
 

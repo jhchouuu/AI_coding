@@ -1,9 +1,9 @@
 ---
-name: mori-bnxt-intranode-testing
-description: Run BNXT intra-node tests for mori project. Use when the user asks to run tests, debug test failures, add new tests, benchmark, or asks about testing mori components (EP, IO, shmem, IR, C++ tests) on a single node with BNXT NIC.
+name: mori-mlnx-intranode-testing
+description: Run Mellanox (CX7) intra-node tests for mori project. Use when the user asks to run tests, debug test failures, add new tests, benchmark, or asks about testing mori components (EP, IO, shmem, IR) on a single node with Mellanox NIC.
 ---
 
-# Mori BNXT Intra-Node Testing
+# Mori Mellanox Intra-Node Testing
 
 ## Important: All commands run inside Docker
 
@@ -14,12 +14,6 @@ All install and test commands MUST be executed inside the Docker container via
 
 Each test run uses a **new container from scratch**. Generate a unique name
 (e.g. `mori_test_<timestamp>`) to avoid conflicts.
-
-The image is private, login first if needed:
-
-```bash
-sudo docker login -u rocmshared
-```
 
 Copy the source code to an isolated directory so concurrent tests don't conflict:
 
@@ -43,40 +37,30 @@ sudo docker run \
   -d --ipc=host --privileged -it \
   -v /home/:/home/ -v /root:/root -v /mnt:/mnt -v "$TEST_SRC":"$TEST_SRC" \
   --name "$CONTAINER_NAME" \
-  rocm/pytorch-private:mori_bnxt235_rocm711_ubuntu24.04_py3.12
+  rocm/pytorch:rocm7.1.1_ubuntu24.04_py3.12_pytorch_release_2.8.0
 ```
 
-## Step 2: Verify BNXT libraries (inside container)
+## Step 2: Verify Mellanox libraries (inside container)
 
-Before installing mori, check that the required BNXT dynamic libraries and
-headers exist inside the container, and that the userlib version matches libibverbs:
+Check that `libmlx5` and libibverbs exist inside the container:
 
 ```bash
 sudo docker exec "$CONTAINER_NAME" bash -c "\
-  echo '=== BNXT shared libraries ===' && \
-  ls -l /usr/local/lib/libbnxt_re*.so* && \
-  echo '' && \
-  echo '=== BNXT headers ===' && \
-  ls -l /usr/include/infiniband/bnxt_re_dv.h /usr/include/infiniband/bnxt_re_hsi.h && \
+  echo '=== libmlx5 ===' && \
+  find /usr -name 'libmlx5*' 2>/dev/null && \
   echo '' && \
   echo '=== libibverbs ===' && \
   dpkg -l | grep libibverbs || rpm -qa | grep libibverbs && \
   echo '' && \
-  echo '=== BNXT userlib version ===' && \
-  strings /usr/local/lib/libbnxt_re.so | grep -i version || true && \
-  echo '' && \
-  echo '=== ibv_devinfo (BNXT device check) ===' && \
+  echo '=== ibv_devinfo (Mellanox device check) ===' && \
   ibv_devinfo 2>/dev/null | head -20 || echo 'ibv_devinfo not available'"
 ```
 
 Verify:
-- `libbnxt_re.so`, `libbnxt_re-rdmav34.so` exist
-- `bnxt_re_dv.h`, `bnxt_re_hsi.h` exist
-- libibverbs and libbnxt_re userlib are built from the same BNXT driver version
-  (version mismatch causes silent IBGDA failures)
+- `libmlx5.so` exists (required for IBGDA with Mellanox ConnectX NICs)
+- libibverbs is installed
 
-If any library is missing or versions don't match, **stop and fix the image**
-before proceeding.
+If `libmlx5` is missing, **stop and fix the image** before proceeding.
 
 ## Step 3: Install mori (inside container)
 
@@ -159,7 +143,7 @@ After all tests complete, produce a summary table:
 | MORI-IO           | PASS   | 145 passed            |
 | MORI-IR shmem put | PASS   | 2 PEs                 |
 | MORI-IR allreduce | PASS   | 8 PEs, 100 GB/s       |
-| MORI-CCL/shmem    | HANG   | killed after 600s     |
+| MORI-CCL/shmem    | PASS   | 18 passed             |
 ```
 
 Possible result values: **PASS**, **FAIL** (non-zero exit), **HANG** (exit 124 / timeout).
@@ -187,8 +171,7 @@ sudo rm -rf "$TEST_SRC"
 
 - [ ] Copy source to isolated temp directory (exclude `build/`)
 - [ ] Create fresh Docker container with unique name
-- [ ] Verify BNXT libs (`libbnxt_re*.so`) and headers (`bnxt_re_dv.h`, `bnxt_re_hsi.h`) exist
-- [ ] Verify libibverbs and libbnxt_re userlib versions match
+- [ ] Verify `libmlx5.so` and libibverbs exist inside container
 - [ ] `pip install .` inside container
 - [ ] `python -c "import mori; print('OK')"` passes inside container
 - [ ] Run each test with `timeout`, record PASS/FAIL/HANG
