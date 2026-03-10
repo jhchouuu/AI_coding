@@ -201,6 +201,15 @@ If the required library is missing, **stop and fix the image** before proceeding
 
 ## Step 4: Install mori (inside container)
 
+To install mori **with** C++ shmem example binaries (for MORI-CPP tests),
+set `BUILD_EXAMPLES=ON`:
+
+```bash
+sudo docker exec "$CONTAINER_NAME" bash -c "cd $TEST_SRC && BUILD_EXAMPLES=ON pip install ."
+```
+
+If you only need Python tests and don't need C++ examples:
+
 ```bash
 sudo docker exec "$CONTAINER_NAME" bash -c "cd $TEST_SRC && pip install ."
 ```
@@ -210,6 +219,10 @@ Verify:
 ```bash
 sudo docker exec "$CONTAINER_NAME" python -c "import mori; print('OK')"
 ```
+
+When `BUILD_EXAMPLES=ON`, the example binaries are at
+`$TEST_SRC/build/examples/` (e.g. `concurrent_put_thread`,
+`concurrent_get_thread`).
 
 ## Step 5: Run Tests (inside container)
 
@@ -225,9 +238,10 @@ exceeds its timeout, `timeout` kills it (exit code 124). Mark that test as
 |------|---------|
 | MORI-EP | 120s |
 | MORI-IO | 60s |
-| MORI-IR shmem put | 60s |
+| MORI-IR shmem | 60s |
 | MORI-IR allreduce | 60s |
 | MORI-CCL/shmem | 600s |
+| MORI-CPP shmem (per binary, per mode) | 60s |
 
 Run each test with `timeout`:
 
@@ -263,6 +277,35 @@ timeout 60 torchrun --nproc_per_node=2 examples/shmem/ir/test_triton_shmem.py
 timeout 60 torchrun --nproc_per_node=8 examples/shmem/ir/test_triton_allreduce.py
 ```
 
+### MORI-CPP shmem examples (requires BUILD_EXAMPLES=ON)
+
+C++ shmem example binaries test the low-level device API directly. Run
+each binary with `mpirun -np 2` in two modes: **P2P** (default) and
+**IBGDA** (`MORI_DISABLE_P2P=ON`).
+
+Available shmem binaries (in `$TEST_SRC/build/examples/`):
+
+| Binary | Description |
+|--------|-------------|
+| `concurrent_put_thread` | PUT: legacy + address API, thread/block, large data, atomics |
+| `concurrent_get_thread` | GET: legacy + address API, thread/block, large data |
+| `concurrent_put_imm_thread` | PUT immediate (inline small values) |
+| `concurrent_put_signal_thread` | PUT with signal |
+| `atomic_nonfetch_thread` | Atomic non-fetch operations |
+| `atomic_fetch_thread` | Atomic fetch operations |
+
+```bash
+# P2P mode (default transport)
+timeout 60 mpirun --allow-run-as-root -np 2 ./build/examples/concurrent_put_thread
+timeout 60 mpirun --allow-run-as-root -np 2 ./build/examples/concurrent_get_thread
+
+# IBGDA mode (RDMA transport via NIC)
+MORI_DISABLE_P2P=ON timeout 60 mpirun --allow-run-as-root -np 2 ./build/examples/concurrent_put_thread
+MORI_DISABLE_P2P=ON timeout 60 mpirun --allow-run-as-root -np 2 ./build/examples/concurrent_get_thread
+```
+
+Optional: test with VMM heap mode by adding `MORI_SHMEM_MODE=VMM_HEAP`.
+
 ### MORI-CCL / shmem (timeout 600s)
 
 ```bash
@@ -274,20 +317,30 @@ timeout 600 pytest tests/python/shmem/test_api.py -v
 After all tests complete, produce a summary table:
 
 ```
-| Test              | Result | Details               |
-|-------------------|--------|-----------------------|
-| MORI-EP           | PASS   | 80 passed, 176 skipped |
-| MORI-IO           | PASS   | 145 passed            |
-| MORI-IR shmem put | PASS   | 2 PEs                 |
-| MORI-IR allreduce | PASS   | 8 PEs, 100 GB/s       |
-| MORI-CCL/shmem    | PASS   | 18 passed             |
+| Test                       | Result | Details                    |
+|----------------------------|--------|----------------------------|
+| MORI-EP                    | PASS   | 80 passed, 176 skipped     |
+| MORI-IO                    | PASS   | 145 passed                 |
+| MORI-IR shmem              | PASS   | 2 PEs                      |
+| MORI-IR allreduce          | PASS   | 8 PEs, 100 GB/s            |
+| MORI-CPP put (P2P)         | PASS   | 10 tests                   |
+| MORI-CPP put (IBGDA)       | PASS   | 9 tests (skip direct P2P)  |
+| MORI-CPP get (P2P)         | PASS   | 5 tests                    |
+| MORI-CPP get (IBGDA)       | PASS   | 5 tests                    |
+| MORI-CCL/shmem             | PASS   | 18 passed                  |
 ```
 
 Possible result values: **PASS**, **FAIL** (non-zero exit), **HANG** (exit 124 / timeout).
 
 ## Step 6: Cleanup
 
-After all tests complete (pass or fail), remove the container and the copied source:
+**Important:** During active development or iterative debugging, do NOT
+automatically delete the container or source copy. Keep them around so
+subsequent test runs can reuse them (skip Steps 2–4, jump straight to
+Step 5). Only clean up when the user explicitly asks or when all
+development tasks are complete.
+
+When the user explicitly requests cleanup:
 
 ```bash
 sudo docker rm -f "$CONTAINER_NAME"
@@ -311,12 +364,12 @@ sudo rm -rf "$TEST_SRC"
 - [ ] Copy source to isolated temp directory (exclude `build/`)
 - [ ] Create fresh Docker container with the matching image
 - [ ] Verify NIC-specific libraries exist inside container
-- [ ] `pip install .` inside container
+- [ ] `BUILD_EXAMPLES=ON pip install .` inside container (or without BUILD_EXAMPLES if no CPP tests needed)
 - [ ] `python -c "import mori; print('OK')"` passes inside container
 - [ ] Run each test with `timeout`, record PASS/FAIL/HANG
 - [ ] If a test hangs (exit 124), kill it and continue to the next
 - [ ] After all tests, produce final summary report table
-- [ ] Remove container (`sudo docker rm -f`) and temp source (`sudo rm -rf`)
+- [ ] Keep container for reuse during development; only remove when user requests
 
 ## Debugging Failures
 

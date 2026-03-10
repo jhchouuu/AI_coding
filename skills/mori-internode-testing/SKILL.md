@@ -304,8 +304,13 @@ Possible result values: **PASS**, **FAIL** (non-zero exit), **HANG** (exit 124 /
 
 ## Step 7: Cleanup
 
-After the test completes (pass or fail), remove containers and temp source on
-**both** nodes:
+**Important:** During active development or iterative debugging, do NOT
+automatically delete containers or source copies. Keep them for reuse so
+subsequent test runs can skip Steps 3–5. Only clean up when the user
+explicitly asks or when all development tasks are complete.
+
+When the user explicitly requests cleanup, remove containers and temp
+source on **both** nodes:
 
 ```bash
 sudo docker rm -f "$CONTAINER_NAME"
