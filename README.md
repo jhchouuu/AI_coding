@@ -10,6 +10,7 @@ A collection of AI agent skills and rules for automated coding workflows.
 | [mori-intranode-testing](skills/mori-intranode-testing/SKILL.md) | Single-node tests (EP, IO, IR, CPP, CCL/shmem) — supports bnxt/mlx5/ionic |
 | [mori-internode-testing](skills/mori-internode-testing/SKILL.md) | 2-node EP16 benchmark and stress tests — supports bnxt/mlx5/ionic |
 | [mori-shmem-dev](skills/mori-shmem-dev/SKILL.md) | SHMEM device API development workflow — kernel impl, testing across all NIC vendors |
+| [pytorch-rocm-build](skills/pytorch-rocm-build/SKILL.md) | Build PyTorch from source on AMD ROCm — Docker setup, hipify, editable install, dev workflow |
 
 ## Usage
 
