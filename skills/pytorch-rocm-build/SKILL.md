@@ -1,11 +1,47 @@
 ---
 name: pytorch-rocm-build
-description: Build PyTorch from source on AMD ROCm platforms. Covers Docker container setup, submodule initialization, hipification, source build, and editable install for development. Use when building PyTorch from source on MI300/MI355 or other AMD GPUs, or when needing to modify PyTorch Python/C++ code on ROCm.
+description: Build PyTorch from source on AMD ROCm platforms with Mori shmem SymmetricMemory integration. Covers Docker container setup, submodule initialization, hipification, source build, Mori backend configuration, and CI testing. Use when building PyTorch from source on MI300/MI350/MI325 AMD GPUs, modifying PyTorch Python/C++ code on ROCm, or integrating Mori shmem as the SymmetricMemory backend.
 ---
 
-# PyTorch ROCm Source Build
+# PyTorch ROCm Source Build + Mori SymmetricMemory Integration
 
-## Important: All build commands run inside Docker
+## Architecture Overview
+
+Mori shmem is integrated into PyTorch as a SymmetricMemory backend for AMD GPUs,
+supporting intra-node P2P and inter-node RDMA (IBGDA) across MLX5, BNXT, and
+AINIC NICs. The integration is pure C++ — no mori Python package dependency at
+runtime.
+
+```
+TORCH_SYMMMEM=MORI
+    ↓
+import torch → torch_hip.so → torch_mori.so → libmori_shmem.so
+                                    ↓
+                        static registration of MORISymmetricMemoryAllocator
+                                    ↓
+              PyTorch fused ops automatically use mori backend
+```
+
+### Key files
+
+| Repository | File | Purpose |
+|-----------|------|---------|
+| pytorch | `torch/csrc/distributed/c10d/symm_mem/MORISymmetricMemory.cpp` | C++ backend: alloc→ShmemMalloc, rendezvous→ShmemPtrP2p, barrier→ShmemBarrierAll |
+| pytorch | `caffe2/CMakeLists.txt` | Auto-detect mori from pip, build libtorch_mori.so in USE_ROCM block |
+| pytorch | `torch/csrc/distributed/c10d/symm_mem/CUDASymmetricMemoryUtils.cpp` | Accept "MORI" in TORCH_SYMMMEM env var |
+| pytorch | `torch/distributed/_symmetric_memory/__init__.py` | set_backend("MORI") support |
+| mori | `CMakeLists.txt` | `target_compile_definitions(spdlog PUBLIC spdlog=mori_spdlog fmt=mori_fmt)` — namespace rename to avoid ROCm librocroller symbol conflict |
+| mori | `src/shmem/init.cpp` | ShmemInit re-entrancy guard |
+| mori | `python/mori/cpp/__init__.py` | RTLD_NOLOAD for mixed-use safety |
+
+### Branches
+
+| Repo | Branch |
+|------|--------|
+| pytorch (fork) | `jhchouuu/pytorch` : `jiahzhou/pytorch_mori_shmem_integrate` |
+| mori | `ROCm/mori` : `jiahzhou/pytorch_mori_shmem_integrate` |
+
+## Important: All commands run inside Docker
 
 All build and test commands MUST be executed inside a Docker container via
 `sudo docker exec`. The host typically does not have ROCm build tools installed.
@@ -15,219 +51,299 @@ All build and test commands MUST be executed inside a Docker container via
 | NIC Type | Docker Image |
 |----------|--------------|
 | mlx5 (Mellanox CX7) | `rocm/pytorch:rocm7.1.1_ubuntu24.04_py3.12_pytorch_release_2.8.0` |
-| bnxt (Broadcom Thor2) | `rocm/pytorch-private:mori_bnxt_rocm7.1.1_ubuntu24.04_py3.12` |
-| ionic (AMD AINIC) | `rocm/pytorch-private:sglang-0.5.8-rocm720-mi35x-mori-0216` |
-| mori dev | `rocm/mori:rocm7.1.1_ubuntu24.04_py3.12_pytorch_release_2.9.1` |
+| bnxt (Broadcom Thor2) | `rocm/pytorch-private:mori_bnxt235_rocm711_ubuntu24.04_py3.12` |
+| ionic (AMD AINIC) | `rocm/pytorch-private:sglang-0.5.9-rocm720-mi35x-mori-0305` |
 
 Private images require `sudo docker login -u rocmshared`.
 
-## Step 2: Create or start Docker container
-
-If container already exists, start it:
+## Step 2: Create Docker container
 
 ```bash
+DOCKER_IMAGE="rocm/pytorch:rocm7.1.1_ubuntu24.04_py3.12_pytorch_release_2.8.0"
 CONTAINER_NAME="pytorch_rocm_build"
-sudo docker start $CONTAINER_NAME 2>/dev/null
-```
-
-Otherwise, create a new container:
-
-```bash
-DOCKER_IMAGE="rocm/mori:rocm7.1.1_ubuntu24.04_py3.12_pytorch_release_2.9.1"
-CONTAINER_NAME="pytorch_rocm_build"
-PT_SRC="/mnt/nvme1/jiahzhou/pytorch"
 
 sudo docker run \
   --group-add video --network=host \
   --ulimit nproc=100000:100000 --pids-limit=-1 \
   --device=/dev/kfd --device=/dev/dri --device=/dev/infiniband \
   -d --ipc=host --privileged -it \
-  -v /home/:/home/ -v /root:/root -v /mnt:/mnt \
+  -v /home/:/home/ -v /root:/root -v /nfs:/nfs -v /mnt:/mnt \
   --name "$CONTAINER_NAME" \
   "$DOCKER_IMAGE"
 ```
 
-## Step 3: Fix git safe.directory
-
-The source tree may be owned by a different user than the container's root:
+## Step 3: Install system dependencies
 
 ```bash
-sudo docker exec $CONTAINER_NAME bash -c \
-  "git config --global --add safe.directory '*'"
+sudo docker exec $CONTAINER_NAME bash -c "
+  apt-get update -qq && apt-get install -y -qq \
+    libopenmpi-dev openmpi-bin libpci-dev libibverbs-dev cmake ninja-build > /dev/null 2>&1
+  pip install cmake ninja pyyaml typing_extensions expecttest pytest-timeout -q
+  git config --global --add safe.directory '*'
+  echo 'OK'
+"
 ```
 
-## Step 4: Initialize submodules
+## Step 4: Install mori (prerequisite for torch_mori)
 
-Inside the container:
+Mori must be installed before building PyTorch so cmake can find
+`libmori_shmem.so` and headers.
 
 ```bash
-sudo docker exec $CONTAINER_NAME bash -c \
-  "cd $PT_SRC && git submodule update --init --recursive"
+MORI_SRC="/nfs/users/jiahzhou/mori"
+sudo docker exec $CONTAINER_NAME bash -c "
+  cd $MORI_SRC && rm -rf build/CMakeCache.txt build/CMakeFiles
+  pip install . 2>&1 | tail -3
+"
 ```
 
-Verify key submodules:
-
+Verify:
 ```bash
-sudo docker exec $CONTAINER_NAME bash -c \
-  "ls $PT_SRC/third_party/pybind11/CMakeLists.txt && echo 'submodules OK'"
+sudo docker exec $CONTAINER_NAME bash -c "
+  python -c 'import mori; print(\"mori OK\")'
+  ls \$(python -c 'import mori,os; print(os.path.dirname(mori.__file__))')/libmori_shmem.so && echo 'lib OK'
+"
 ```
 
-If a specific submodule is missing (e.g. `psimd`):
+## Step 5: Prepare PyTorch source
 
 ```bash
-sudo docker exec $CONTAINER_NAME bash -c \
-  "cd $PT_SRC && git submodule update --init --force third_party/psimd"
-```
+PT_SRC="/nfs/users/jiahzhou/pytorch"
 
-## Step 5: Hipify source tree
-
-**Required before every fresh build on ROCm.** This converts CUDA API calls to
-HIP equivalents in the source tree:
-
-```bash
-sudo docker exec $CONTAINER_NAME bash -c \
-  "cd $PT_SRC && python3 tools/amd_build/build_amd.py"
-```
-
-Expected output ends with `Successfully preprocessed all matching files.`
-
-Note: hipify modifies files in-place. These changes should NOT be committed.
-When ready to commit your actual changes, use:
-
-```bash
-git stash -u
-git reset --hard <original_commit>
-git stash pop
+# Copy to local disk for faster I/O (NFS is slow for builds)
+sudo docker exec $CONTAINER_NAME bash -c "
+  rsync -a --exclude=build/ $PT_SRC/ /tmp/pytorch/
+  cd /tmp/pytorch
+  git submodule update --init --recursive
+  python tools/amd_build/build_amd.py  # hipify
+"
 ```
 
 ## Step 6: Build PyTorch
 
-### Standard build (editable install)
+```bash
+sudo docker exec $CONTAINER_NAME bash -c "
+  cd /tmp/pytorch
+  export USE_ROCM=1 USE_CUDA=0 PYTORCH_ROCM_ARCH='gfx942'
+  export USE_DISTRIBUTED=1 USE_NCCL=1 USE_KINETO=0 BUILD_TEST=0
+  export USE_MKLDNN=0 USE_FBGEMM=0 USE_NNPACK=0 USE_QNNPACK=0 USE_XNNPACK=0
+  export MAX_JOBS=32
+  export PYTHONPATH=/tmp/pytorch
+  python setup.py develop 2>&1 | tail -5
+"
+```
+
+Build takes 8-15 minutes (incremental: 1-2 minutes for C++ changes, instant
+for Python-only changes in develop mode).
+
+### Verify Mori backend was built
 
 ```bash
-sudo docker exec -d $CONTAINER_NAME bash -c \
-  "cd $PT_SRC && \
-   export MAX_JOBS=32 && \
-   export PYTORCH_ROCM_ARCH=gfx942 && \
-   export USE_MSLK=0 && \
-   pip install -e . -v --no-build-isolation > /tmp/pytorch_build.log 2>&1"
+sudo docker exec $CONTAINER_NAME bash -c "
+  ls /tmp/pytorch/torch/lib/libtorch_mori.so && echo 'torch_mori: OK'
+  ldd /tmp/pytorch/torch/lib/libtorch_mori.so | grep mori
+"
 ```
 
-Key environment variables:
+Expected:
+```
+torch_mori: OK
+libmori_shmem.so => /opt/venv/.../mori/libmori_shmem.so
+```
 
-| Variable | Value | Notes |
-|----------|-------|-------|
-| `MAX_JOBS` | `32` (adjust for CPU count) | Parallel compilation jobs |
-| `PYTORCH_ROCM_ARCH` | `gfx942` (MI300) or `gfx950` (MI355) | Target GPU architecture |
-| `USE_MSLK` | `0` | Disable mslk if submodule has issues |
-| `USE_NVSHMEM` | auto | Not relevant for ROCm |
-
-### Monitor build progress
+### Verify import and backend registration
 
 ```bash
-# Check line count and latest output
-sudo docker exec $CONTAINER_NAME bash -c \
-  "wc -l /tmp/pytorch_build.log && tail -5 /tmp/pytorch_build.log"
-
-# Check for compilation errors
-sudo docker exec $CONTAINER_NAME bash -c \
-  "grep -i 'FAILED\|fatal error' /tmp/pytorch_build.log | head -10"
-
-# Check active build processes
-sudo docker exec $CONTAINER_NAME bash -c \
-  "ps aux | grep -E 'cmake|ninja|hipcc' | grep -v grep | wc -l"
+sudo docker exec $CONTAINER_NAME bash -c "
+  TORCH_SYMMMEM=MORI PYTHONPATH=/tmp/pytorch python -c '
+    import torch
+    from torch._C._distributed_c10d import _SymmetricMemory
+    print(\"backend:\", _SymmetricMemory.get_backend(torch.device(\"cuda:0\")))
+  '
+"
 ```
 
-Build typically takes 20-40 minutes with MAX_JOBS=32. Expected ~6000 compilation
-steps (fewer with `USE_MSLK=0`).
+Expected: `backend: MORI`
 
-### Clean rebuild
+## Step 7: Run Tests
 
-If cmake cache is stale (e.g. after changing cmake options):
+### Quick functional test (no CI framework)
 
 ```bash
-sudo docker exec $CONTAINER_NAME bash -c \
-  "rm -rf $PT_SRC/build"
+sudo docker exec $CONTAINER_NAME bash -c "
+  TORCH_SYMMMEM=MORI PYTHONPATH=/tmp/pytorch \
+  timeout 60 torchrun --nproc_per_node=2 \
+    /nfs/users/jiahzhou/mori/examples/shmem/test_pure_cpp_backend.py 2>&1
+"
 ```
 
-Then re-run the build command.
+### PyTorch CI symmetric memory tests
 
-## Step 7: Verify build
+Download the matching test file:
 
 ```bash
-sudo docker exec $CONTAINER_NAME bash -c "python3 -c '
-import torch
-print(f\"PyTorch: {torch.__version__}\")
-print(f\"HIP: {torch.version.hip}\")
-print(f\"CUDA available: {torch.cuda.is_available()}\")
-print(f\"Device: {torch.cuda.get_device_name(0)}\")
-'"
+sudo docker exec $CONTAINER_NAME bash -c "
+  COMMIT=\$(cd /tmp/pytorch && git rev-parse HEAD)
+  mkdir -p /tmp/ci_test/test/distributed
+  curl -sL \"https://raw.githubusercontent.com/pytorch/pytorch/\$COMMIT/test/distributed/test_symmetric_memory.py\" \
+    -o /tmp/ci_test/test/distributed/test_symmetric_memory.py
+"
 ```
 
-Expected output:
+Run AsyncTP fused ops tests (all should PASS):
 
+```bash
+sudo docker exec $CONTAINER_NAME bash -c "
+  cd /tmp/ci_test
+  TORCH_SYMMMEM=MORI PYTHONPATH=/tmp/pytorch \
+  python -m pytest test/distributed/test_symmetric_memory.py::AsyncTPTest \
+    -v --timeout=60 \
+    -k 'test_fused_all_gather_matmul_gather_dim or \
+        test_fused_matmul_reduce_scatter_scatter_dim or \
+        test_optimal_layout'
+"
 ```
-PyTorch: 2.12.0a0+git<hash>
-HIP: 7.1.52802
-CUDA available: True
-Device: AMD Instinct MI308X
+
+Run SymmetricMemoryTest (core API):
+
+```bash
+sudo docker exec $CONTAINER_NAME bash -c "
+  cd /tmp/ci_test
+  TORCH_SYMMMEM=MORI PYTHONPATH=/tmp/pytorch \
+  python -m pytest test/distributed/test_symmetric_memory.py::SymmetricMemoryTest \
+    -v --timeout=60 \
+    -k 'test_has_multicast or test_get_signal_pad_size or \
+        (test_low_contention and not symm_mem_input_True)'
+"
 ```
+
+### Expected CI test results
+
+| Test | Result | Notes |
+|------|--------|-------|
+| `test_fused_all_gather_matmul_gather_dim_0/1/2` | PASS | |
+| `test_fused_matmul_reduce_scatter_scatter_dim_0/1/2` | PASS | |
+| `test_optimal_layout_dim_0/1/2` | PASS | |
+| `test_has_multicast_support` | PASS | returns False for AMD |
+| `test_get_signal_pad_size` | PASS | |
+| `test_low_contention_all_gather_symm_mem_input_False` | PASS | |
+| `test_low_contention_reduce_scatter_*_symm_mem_input_False` | PASS | |
+| `test_large_alloc` | FAIL | heap size limit (set MORI_SHMEM_HEAP_SIZE=4G) |
+| `test_*_symm_mem_input_True` | SKIP | needs C++ empty() alloc path |
+| `test_*_scaled_matmul_*` | SKIP | FP8 not yet supported |
+| `test_*_native_*` | SKIP | needs _async_input_mm |
+| `test_*_multimem_*` | SKIP | needs multicast hardware |
+| `test_*_timeout_*` | SKIP | needs put_signal/wait_signal impl |
 
 ## Step 8: Development workflow
 
-Since the build is an **editable install** (`pip install -e .`), Python file
-changes take effect immediately without rebuilding:
+### Python-only changes (instant)
+
+Edit files in `/nfs/users/jiahzhou/pytorch/torch/distributed/_symmetric_memory/`
+on the host. Changes take effect immediately in develop mode.
+
+### C++ changes (incremental rebuild)
 
 ```bash
-# Edit Python files on the host
-vim $PT_SRC/torch/distributed/_symmetric_memory/__init__.py
-
-# Test immediately in container (no rebuild needed)
-sudo docker exec $CONTAINER_NAME bash -c \
-  "python3 -c 'import torch; ...'"
+# Edit MORISymmetricMemory.cpp on the host, then:
+sudo docker exec $CONTAINER_NAME bash -c "
+  cp /nfs/users/jiahzhou/pytorch/torch/csrc/distributed/c10d/symm_mem/MORISymmetricMemory.cpp \
+     /tmp/pytorch/torch/csrc/distributed/c10d/symm_mem/MORISymmetricMemory.cpp
+  cd /tmp/pytorch/build && ninja -j32 torch_mori
+  cd /tmp/pytorch && pip install -e . --no-build-isolation 2>&1 | tail -1
+"
+# Takes ~10 seconds for torch_mori only
 ```
 
-C++ changes require a rebuild. For incremental C++ builds, re-run the pip
-install command — ninja will only recompile changed files:
+### CMake changes (need reconfigure)
 
 ```bash
-sudo docker exec -d $CONTAINER_NAME bash -c \
-  "cd $PT_SRC && MAX_JOBS=32 PYTORCH_ROCM_ARCH=gfx942 USE_MSLK=0 \
-   pip install -e . -v --no-build-isolation > /tmp/pytorch_rebuild.log 2>&1"
+sudo docker exec $CONTAINER_NAME bash -c "
+  cp /nfs/users/jiahzhou/pytorch/caffe2/CMakeLists.txt /tmp/pytorch/caffe2/CMakeLists.txt
+  cd /tmp/pytorch && rm -f build/CMakeCache.txt
+  # Then full rebuild (8-15 min)
+"
+```
+
+## Key design decisions
+
+### Why libtorch_mori.so is a separate shared library
+
+Like NVSHMEM's `torch_nvshmem.so`, mori is isolated in its own `.so` to:
+- Keep mori as an optional dependency (not found → no torch_mori, no error)
+- Avoid pulling mori headers into torch_hip compilation
+- Allow independent version updates
+
+### Why static registration (not ctypes)
+
+`libtorch_mori.so` is auto-loaded via `torch_hip → torch_mori` ELF dependency.
+A static constructor registers `MORISymmetricMemoryAllocator` at import time.
+This matches NVSHMEM's pattern exactly. No Python-side ctypes or manual loading
+needed.
+
+### Why spdlog namespace rename in mori
+
+ROCm's `librocroller.so` bundles its own spdlog. When both are loaded in the
+same process, two spdlog global registries coexist. Mori's spdlog code
+inadvertently uses librocroller's `spdlog::details::registry`, and freeing
+objects across library boundaries causes `free(): invalid size`.
+
+Fix: one line in mori's CMakeLists.txt:
+```cmake
+target_compile_definitions(spdlog PUBLIC spdlog=mori_spdlog fmt=mori_fmt)
+```
+
+This renames all spdlog/fmt symbols to `mori_spdlog`/`mori_fmt`, completely
+isolating them from ROCm's spdlog.
+
+### Why RTLD_NOLOAD in mori's Python package
+
+When users mix C++ backend (`import torch` loads `libmori_shmem.so` via
+torch_hip chain) with mori Python API (`import mori.shmem` loads
+`libmori_shmem.so` via pybinds), the RTLD_NOLOAD check prevents double-loading:
+
+```python
+# mori/cpp/__init__.py
+RTLD_NOLOAD = 0x4
+try:
+    ctypes.CDLL(lib_name, mode=RTLD_NOLOAD | ctypes.RTLD_GLOBAL)
+    continue  # already loaded, skip
+except OSError:
+    pass  # not loaded, load normally
 ```
 
 ## Common issues
 
-### `mslk/utils/tuning_cache_hip.cuh` not found
+### `free(): invalid size` when calling ShmemGetUniqueId
 
-The mslk third-party submodule has hipify issues. Disable with `USE_MSLK=0`.
+**Cause**: spdlog symbol conflict between mori and ROCm's librocroller.so.
+**Fix**: Ensure mori is built with the `spdlog=mori_spdlog` compile definition
+(branch `jiahzhou/pytorch_mori_shmem_integrate`).
 
-### `Did you run 'git submodule update --init --recursive'?`
+### `Mori not found, not building with Mori support`
 
-Submodules not initialized. Run Step 4 inside the container.
+cmake cannot find `libmori_shmem.so`. Ensure mori is pip-installed in the
+build environment before building PyTorch.
 
-### `detected dubious ownership in repository`
+### `SymmetricMemory does not support device type cuda`
 
-Git safe.directory not configured. Run Step 3.
+MORI allocator not registered. Check:
+1. `libtorch_mori.so` exists in `torch/lib/`
+2. `ldd torch/lib/libtorch_hip.so | grep mori` shows dependency
+3. `TORCH_SYMMMEM=MORI` is set (or `set_backend("MORI")` called)
 
-### hipify modified my source files
+### `Could not resolve the process group registered under the name default`
 
-This is expected. Use `git stash` / `git reset` before committing (see Step 5).
-
-### Build hangs with `| tail -100`
-
-Do NOT pipe build output through `tail`. Use file redirection instead:
-`> /tmp/build.log 2>&1`.
-
-## Running distributed tests
-
-```bash
-# 2-GPU test
-sudo docker exec $CONTAINER_NAME bash -c \
-  "torchrun --nproc_per_node=2 test/distributed/test_symmetric_memory.py -v"
-
-# 4-GPU test (for one_shot_all_reduce etc.)
-sudo docker exec $CONTAINER_NAME bash -c \
-  "torchrun --nproc_per_node=4 test/distributed/test_symmetric_memory.py \
-   SymmMemCollectiveTest -v"
+`MORISymmetricMemory.cpp` falls back to group "0" if "default" is not found.
+Ensure the process group is registered before calling fused ops:
+```python
+torch._C._distributed_c10d._register_process_group('default', dist.group.WORLD)
 ```
+
+### Build takes too long
+
+- Use local disk (`/tmp/pytorch`) instead of NFS for the build tree
+- Set `MAX_JOBS=32` (or match CPU core count)
+- Disable unused components: `USE_MKLDNN=0 USE_FBGEMM=0 USE_NNPACK=0 ...`
+- Incremental C++ rebuild (ninja only recompiles changed files): ~10s
+- Python changes: instant (develop mode)
