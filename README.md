@@ -11,6 +11,7 @@ A collection of AI agent skills and rules for automated coding workflows.
 | [mori-internode-testing](skills/mori-internode-testing/SKILL.md) | 2-node EP16 benchmark and stress tests — supports bnxt/mlx5/ionic |
 | [mori-shmem-dev](skills/mori-shmem-dev/SKILL.md) | SHMEM device API development workflow — kernel impl, testing across all NIC vendors |
 | [pytorch-rocm-build](skills/pytorch-rocm-build/SKILL.md) | Build PyTorch from source on AMD ROCm — Docker setup, hipify, editable install, dev workflow |
+| [mori-shmem-cpp-integration](skills/mori-shmem-cpp-integration/SKILL.md) | SHMEM C++ integration — globalGpuStates init, user pathways, CMake find_package(mori) |
 | [mori-codebase-architecture](skills/mori-codebase-architecture/SKILL.md) | MORI codebase architecture — module structure, build system, key concepts |
 
 ## Usage
