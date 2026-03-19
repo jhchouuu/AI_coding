@@ -22,13 +22,16 @@ mori/
 │   │   └── kernels/           # .hip GPU kernel sources (JIT/AOT compiled)
 │   ├── io/                 # mori_io: P2P communication engine
 │   └── pybind/             # mori_pybinds: Python bindings
-├── python/mori/            # Python package
+├── python/mori/            # Python package (lazy imports via __getattr__)
 │   ├── ops/                # EP dispatch/combine Python API
 │   ├── shmem/              # Shmem Python API
 │   ├── io/                 # IO engine Python API
 │   ├── ir/                 # Device bitcode for Triton integration
 │   ├── jit/                # JIT kernel compilation + caching
 │   └── kernel_profiler/    # Warp-level profiler (Perfetto)
+├── cmake/
+│   ├── MoriDetectDevice.cmake  # Reusable GPU arch + NIC detection module
+│   └── mori-config.cmake       # find_package(mori) support
 ├── tests/
 │   ├── python/             # pytest (ops, shmem, io)
 │   └── cpp/                # C++ tests (transport, io, AOT launch)
@@ -43,7 +46,7 @@ mori/
 
 | Library | CMake Target | Purpose | Dependencies |
 |---------|-------------|---------|--------------|
-| `mori_application` | `src/application/` | Bootstrap (MPI/socket/torch), RDMA transport (mlx5/bnxt/ionic), topology, symmetric memory | MPI, ibverbs, hip |
+| `mori_application` | `src/application/` | Bootstrap (socket/torch, MPI optional), RDMA transport (mlx5/bnxt/ionic), topology, symmetric memory | ibverbs, hip, MPI (optional) |
 | `mori_shmem` | `src/shmem/` | OpenSHMEM-style APIs: init, malloc, barrier, module init | mori_application |
 | `mori_ops` | `src/ops/` | EP dispatch/combine handle + C++ launch wrappers | mori_shmem, mori_application |
 | `mori_io` | `src/io/` | P2P IO engine (RDMA/XGMI backends) | mori_application |
@@ -75,6 +78,8 @@ C++ code: LaunchDispatch(handle, ...)  →  hipModuleLaunchKernel
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `BUILD_EXAMPLES` | ON | Build C++ examples (implies `WITH_MPI=ON`) |
+| `WITH_MPI` | `${BUILD_EXAMPLES}` | Enable MPI bootstrap + `ShmemMpiInit`. Also controllable via `MORI_WITH_MPI` env var |
 | `BUILD_OPS` | ON | Build mori_ops (host + launch.cpp) |
 | `BUILD_OPS_DEVICE` | OFF | AOT compile .hip → .hsaco (needs hipcc) |
 | `BUILD_SHMEM` | ON | Build mori_shmem |
@@ -83,6 +88,12 @@ C++ code: LaunchDispatch(handle, ...)  →  hipModuleLaunchKernel
 | `BUILD_TESTS` | ON | Build C++ tests |
 | `ENABLE_PROFILER` | OFF | Kernel profiling |
 | `ENABLE_STANDARD_MOE_ADAPT` | OFF | DeepEP-compatible APIs |
+
+`pip install .` passes `BUILD_EXAMPLES=OFF` by default → no MPI required.
+`BUILD_EXAMPLES=ON pip install .` or `MORI_WITH_MPI=ON pip install .` enables MPI.
+
+`find_package(mori)` is supported via `cmake/mori-config.cmake` (installed with `cmake --install`).
+Available imported targets: `mori::shmem`, `mori::application`, `mori::ops`, `mori::io`.
 
 ## NIC Detection (3 implementations, same logic)
 
@@ -125,13 +136,31 @@ Singleton managing .hsaco loading. `AutoLoad()` detects GPU arch + NIC and searc
 
 ## C++ User Quick Start
 
+MPI bootstrap (requires `WITH_MPI=ON`):
 ```cpp
 #include "mori/ops/dispatch_combine/launch.hpp"
 #include "mori/shmem/shmem_api.hpp"
 
-mori::shmem::ShmemMpiInit(MPI_COMM_WORLD);
+mori::shmem::ShmemMpiInit(MPI_COMM_WORLD);  // needs WITH_MPI=ON
 mori::moe::EpDispatchCombineHandle handle(config);
 mori::moe::LaunchDispatch(handle, input, weights, scales, indices, ...);
+```
+
+Socket bootstrap (no MPI needed):
+```cpp
+mori_shmem_uniqueid_t uid;
+mori::shmem::ShmemGetUniqueId(&uid);         // rank 0 broadcasts uid
+mori_shmem_init_attr_t attr;
+mori::shmem::ShmemSetAttrUniqueIdArgs(rank, nranks, &uid, &attr);
+mori::shmem::ShmemInitAttr(MORI_SHMEM_INIT_WITH_UNIQUEID, &attr);
+```
+
+With `find_package(mori)`:
+```cmake
+find_package(mori REQUIRED)
+mori_detect_device_config()
+target_link_libraries(my_app mori::shmem hip::device)
+mori_add_device_target(my_app)
 ```
 
 ## Python User Quick Start
@@ -161,3 +190,4 @@ out = op.dispatch(input, weights, scales, indices)
 | `MORI_EP_LAUNCH_CONFIG_MODE` | MANUAL or AUTO launch params |
 | `MORI_RDMA_DEVICES` | RDMA NIC selection (include/exclude) |
 | `MORI_SOCKET_IFNAME` | Network interface for bootstrap TCP |
+| `MORI_WITH_MPI` | Enable MPI support at build time (same as `-DWITH_MPI=ON`) |
